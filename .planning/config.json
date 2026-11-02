@@ -1,0 +1,15 @@
+{
+  "project": "CodeReviewer",
+  "version": "1.0.0",
+  "framework": "GSD-Spec-Driven-Dev",
+  "workflow": {
+    "phases": [
+      "01-sbom-xml-generation",
+      "02-vulnerability-scanning-gate",
+      "03-pr-merge-enforcement-ui"
+    ],
+    "verificationMethod": "automated-tests-and-http-integration",
+    "gatePolicy": "block-on-high-critical"
+  }
+}
+

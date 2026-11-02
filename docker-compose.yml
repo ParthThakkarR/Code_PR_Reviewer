@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend_express
+    ports:
+      - "5001:5001"
+    depends_on:
+      - redis
+      - mongo
+      - analyzer
+    environment:
+      - PORT=5001
+      - PYTHON_SERVICE_URL=http://analyzer:8000/analyze
+      - MONGO_URI=mongodb://mongo:27017/ai-review
+      - MONGO_URL=mongodb://mongo:27017/ai-review
+      - REDIS_HOST=redis
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_PRIVATE_KEY=${GITHUB_PRIVATE_KEY}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+
+  analyzer:
+    build: ./analyzer_python
+    # Internal only — not exposed to host
+    expose:
+      - "8000"
+
+  redis:
+    image: redis:7
+    # Internal only — not exposed to host
+    expose:
+      - "6379"
+
+  mongo:
+    image: mongo:6
+    # Internal only — not exposed to host
+    expose:
+      - "27017"

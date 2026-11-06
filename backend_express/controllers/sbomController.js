@@ -1,3 +1,9 @@
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import mongoose from "mongoose";
+import { z } from "zod";
+
 import PRCheck from "../models/prCheck.js";
 import {
     parseManifestContent,
@@ -6,7 +12,8 @@ import {
 } from "../services/sbomXmlService.js";
 import {
     scanComponentsVulnerabilities,
-    evaluateMergeGate
+    evaluateMergeGate,
+    makeErrorResult
 } from "../services/vulnerabilityService.js";
 import {
     fetchBranchManifest,
@@ -14,113 +21,119 @@ import {
     listRepoPullRequests
 } from "../services/prMergeService.js";
 
-// Clean base manifest
-const DEMO_BASE_PACKAGE_JSON = JSON.stringify({
-    name: "payment-service",
-    version: "1.0.0",
-    dependencies: {
-        "dotenv": "17.3.1",
-        "ms": "2.1.3"
-    }
-}, null, 2);
+// Load server-side versioned gate policy (Req #4)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+let GATE_POLICY = { policy: "standard", blockSeverities: ["CRITICAL", "HIGH"], cvssThreshold: 7.5 };
+try {
+    const policyPath = join(__dirname, "../config/gatePolicy.json");
+    GATE_POLICY = JSON.parse(readFileSync(policyPath, "utf8"));
+} catch (err) {
+    console.warn("Could not load gatePolicy.json, using fallback policy:", err.message);
+}
 
-// Clean feature branch (0 vulnerabilities -> PASSED -> MERGE ALLOWED)
-const DEMO_SAFE_FEATURE_PACKAGE_JSON = JSON.stringify({
-    name: "payment-service",
-    version: "1.1.0",
-    dependencies: {
-        "dotenv": "17.3.1",
-        "ms": "2.1.3",
-        "dayjs": "1.11.13",
-        "clsx": "2.1.1"
-    }
-}, null, 2);
-
-// Insecure feature branch (Contains Critical & High CVEs -> FAILED -> MERGE BLOCKED)
-const DEMO_VULNERABLE_FEATURE_PACKAGE_JSON = JSON.stringify({
-    name: "payment-service",
-    version: "1.1.0",
-    dependencies: {
-        "dotenv": "17.3.1",
-        "ms": "2.1.3",
-        "jsonwebtoken": "9.0.0",      // CRITICAL CVE-2022-23529
-        "axios": "0.21.1",             // HIGH CVE-2021-3749 ReDoS
-        "lodash": "4.17.15"            // HIGH CVE-2020-8203 Prototype Pollution
-    }
-}, null, 2);
+// Zod Input Validation Schema (Req #6)
+const checkSbomSchema = z.object({
+    owner: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_.-]+$/, "Invalid owner name"),
+    repo: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_.-]+$/, "Invalid repo name"),
+    prNumber: z.union([
+        z.number().int().positive(),
+        z.string().regex(/^\d+$/).transform(Number)
+    ]).optional().nullable(),
+    prTitle: z.string().max(500).optional().default(""),
+    baseBranch: z.string().min(1).max(255).default("main"),
+    featureBranch: z.string().min(1).max(255),
+    manifestType: z.enum(["auto", "npm", "package.json", "package-lock", "yarn", "pnpm", "poetry", "pipfile-lock", "pip", "requirements.txt"]).optional().default("auto")
+});
 
 export const checkPrSbom = async (req, res) => {
     try {
+        // Validate input schema
+        const parseResult = checkSbomSchema.safeParse(req.body);
+        if (!parseResult.success) {
+            return res.status(400).json({
+                error: "VALIDATION_ERROR",
+                message: "Invalid input parameters",
+                details: parseResult.error.flatten()
+            });
+        }
+
         const {
-            owner = "org",
-            repo = "repository",
+            owner,
+            repo,
             prNumber = null,
             prTitle = "",
             baseBranch = "main",
-            featureBranch = "feature/new-module",
-            policy = "standard",
-            manifestType = "auto",
-            testPreset = null
-        } = req.body;
-
-        let baseContent = req.body.baseManifest;
-        let featureContent = req.body.featureManifest;
+            featureBranch,
+            manifestType = "auto"
+        } = parseResult.data;
 
         const token = req.user?.accessToken;
 
-        // Fetch from GitHub if configured
-        if (!baseContent && owner && repo && baseBranch && token) {
-            const fetched = await fetchBranchManifest(owner, repo, baseBranch, token);
-            if (fetched) baseContent = fetched.content;
+        // Fetch manifests strictly on server from GitHub by branch & commit (Req #3)
+        const [baseFetched, featureFetched] = await Promise.all([
+            fetchBranchManifest(owner, repo, baseBranch, token),
+            fetchBranchManifest(owner, repo, featureBranch, token)
+        ]);
+
+        // Fail-closed if manifests cannot be fetched (Req #19)
+        if (!baseFetched || !baseFetched.content || !featureFetched || !featureFetched.content) {
+            return res.status(422).json({
+                error: "ERROR",
+                status: "ERROR",
+                message: `Could not fetch manifests from GitHub for repository ${owner}/${repo}. Ensure base (${baseBranch}) and feature (${featureBranch}) branches exist and contain valid manifest files.`
+            });
         }
 
-        if (!featureContent && owner && repo && featureBranch && token) {
-            const fetched = await fetchBranchManifest(owner, repo, featureBranch, token);
-            if (fetched) featureContent = fetched.content;
-        }
-
-        // Apply defaults/presets
-        if (!baseContent) {
-            baseContent = DEMO_BASE_PACKAGE_JSON;
-        }
-
-        if (!featureContent) {
-            if (testPreset === "vulnerable") {
-                featureContent = DEMO_VULNERABLE_FEATURE_PACKAGE_JSON;
-            } else {
-                featureContent = DEMO_SAFE_FEATURE_PACKAGE_JSON;
-            }
-        }
+        const baseContent = baseFetched.content;
+        const featureContent = featureFetched.content;
+        const baseSha = baseFetched.sha || null;
+        const headSha = featureFetched.sha || null;
 
         // Parse manifests
         const baseComponents = parseManifestContent(baseContent, manifestType);
         const featureComponents = parseManifestContent(featureContent, manifestType);
 
-        // Run vulnerability scan
-        const [featureVulns, baseVulns] = await Promise.all([
-            scanComponentsVulnerabilities(featureComponents),
-            scanComponentsVulnerabilities(baseComponents)
-        ]);
+        // Fail-closed on empty SBOMs (Req #19)
+        if (featureComponents.length === 0) {
+            return res.status(422).json({
+                error: "ERROR",
+                status: "ERROR",
+                message: "Feature branch SBOM is empty (no dependencies detected). Merge blocked by fail-closed policy."
+            });
+        }
 
-        // Evaluate Merge Gate
-        const gateEvaluation = evaluateMergeGate(featureVulns, baseVulns, policy);
+        // Run vulnerability scan with chunked OSV batching & fail-closed error handling
+        let featureVulns = [];
+        let baseVulns = [];
+        let gateEvaluation;
 
-        // Generate CycloneDX XML for Current (Base) Feature/Branch
+        try {
+            [featureVulns, baseVulns] = await Promise.all([
+                scanComponentsVulnerabilities(featureComponents),
+                scanComponentsVulnerabilities(baseComponents)
+            ]);
+            gateEvaluation = evaluateMergeGate(featureVulns, baseVulns, GATE_POLICY);
+        } catch (scanErr) {
+            console.error("Vulnerability scan failure:", scanErr.message);
+            gateEvaluation = makeErrorResult(`Scanner error: ${scanErr.message}. Merge blocked.`);
+        }
+
+        // Generate CycloneDX 1.4 XML for Current / Base branch
         const currentXmlSbom = generateCycloneDxXml({
             projectName: repo,
             version: "base",
             branch: baseBranch,
-            commit: "base-head",
+            commit: baseSha || "base-head",
             components: baseComponents,
             vulnerabilities: baseVulns
         });
 
-        // Generate CycloneDX XML for Feature Branch
+        // Generate CycloneDX 1.4 XML for Feature branch
         const featureXmlSbom = generateCycloneDxXml({
             projectName: repo,
             version: "feature",
             branch: featureBranch,
-            commit: "feature-head",
+            commit: headSha || "feature-head",
             components: featureComponents,
             vulnerabilities: gateEvaluation.vulnerabilities
         });
@@ -134,7 +147,7 @@ export const checkPrSbom = async (req, res) => {
             totalComponentsFeature: featureComponents.length
         };
 
-        // Persist in MongoDB
+        // Persist audit record in MongoDB bound to commit SHAs (Req #24)
         const prCheck = await PRCheck.create({
             owner,
             repo,
@@ -142,6 +155,8 @@ export const checkPrSbom = async (req, res) => {
             prTitle,
             baseBranch,
             featureBranch,
+            baseSha,
+            headSha,
             status: gateEvaluation.status,
             passVulnerabilityCheck: gateEvaluation.passVulnerabilityCheck,
             canMerge: gateEvaluation.canMerge,
@@ -155,7 +170,7 @@ export const checkPrSbom = async (req, res) => {
             vulnerabilities: gateEvaluation.vulnerabilities,
             statistics,
             componentsDiff,
-            checkedBy: req.user?.profile?.login || "developer"
+            checkedBy: req.user?.profile?.username || req.user?.profile?.login || "developer"
         });
 
         return res.json({
@@ -167,6 +182,8 @@ export const checkPrSbom = async (req, res) => {
             prTitle,
             baseBranch,
             featureBranch,
+            baseSha,
+            headSha,
             status: gateEvaluation.status,
             passVulnerabilityCheck: gateEvaluation.passVulnerabilityCheck,
             canMerge: gateEvaluation.canMerge,
@@ -183,7 +200,7 @@ export const checkPrSbom = async (req, res) => {
         });
     } catch (err) {
         console.error("Error in checkPrSbom:", err);
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ error: "INTERNAL_ERROR", message: err.message });
     }
 };
 
@@ -191,11 +208,11 @@ export const mergePr = async (req, res) => {
     try {
         const { checkId } = req.body;
 
-        let prCheck = null;
-        if (checkId) {
-            prCheck = await PRCheck.findById(checkId);
+        if (!checkId || !mongoose.Types.ObjectId.isValid(checkId)) {
+            return res.status(400).json({ error: "Invalid checkId parameter" });
         }
 
+        const prCheck = await PRCheck.findById(checkId);
         if (!prCheck) {
             return res.status(404).json({ error: "PR Check report not found. Run SBOM security check first." });
         }
@@ -220,42 +237,61 @@ export const mergePr = async (req, res) => {
             });
         }
 
-        let githubMergeResult = null;
-        if (prCheck.prNumber && req.user?.accessToken) {
-            try {
-                githubMergeResult = await mergeGitHubPullRequest({
-                    owner: prCheck.owner,
-                    repo: prCheck.repo,
-                    pullNumber: prCheck.prNumber,
-                    token: req.user.accessToken
-                });
-            } catch (mergeErr) {
-                console.warn("GitHub API merge attempt:", mergeErr.message);
-            }
+        if (!prCheck.prNumber) {
+            return res.status(422).json({
+                error: "CANNOT_MERGE",
+                message: "Cannot merge: no PR number is associated with this check."
+            });
         }
 
+        // Call GitHub merge API passing expected head sha (Req #25)
+        let githubMergeResult;
+        try {
+            githubMergeResult = await mergeGitHubPullRequest({
+                owner: prCheck.owner,
+                repo: prCheck.repo,
+                pullNumber: prCheck.prNumber,
+                sha: prCheck.headSha,
+                token: req.user?.accessToken
+            });
+        } catch (mergeErr) {
+            prCheck.status = "MERGE_FAILED";
+            await prCheck.save();
+            return res.status(502).json({
+                success: false,
+                error: "GITHUB_MERGE_FAILED",
+                message: `GitHub merge API failed: ${mergeErr.message}`,
+                status: "MERGE_FAILED"
+            });
+        }
+
+        // Mark PR merged ONLY after GitHub confirms (Req #25)
         prCheck.status = "MERGED";
         prCheck.mergedAt = new Date();
-        prCheck.mergedBy = req.user?.profile?.login || "developer";
+        prCheck.mergedBy = req.user?.profile?.username || req.user?.profile?.login || "developer";
         await prCheck.save();
 
         return res.json({
             success: true,
             status: "MERGED",
-            message: `Pull Request #${prCheck.prNumber || ''} (${prCheck.featureBranch} → ${prCheck.baseBranch}) was successfully merged!`,
+            message: `Pull Request #${prCheck.prNumber} (${prCheck.featureBranch} → ${prCheck.baseBranch}) was successfully merged!`,
             mergedAt: prCheck.mergedAt,
             mergedBy: prCheck.mergedBy,
             githubResult: githubMergeResult
         });
     } catch (err) {
         console.error("Error in mergePr:", err);
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ error: "INTERNAL_ERROR", message: err.message });
     }
 };
 
 export const getPrCheck = async (req, res) => {
     try {
-        const prCheck = await PRCheck.findById(req.params.id);
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ error: "Invalid check ID format" });
+        }
+        const prCheck = await PRCheck.findById(id);
         if (!prCheck) return res.status(404).json({ error: "Check not found" });
         return res.json(prCheck);
     } catch (err) {
@@ -266,6 +302,9 @@ export const getPrCheck = async (req, res) => {
 export const downloadXml = async (req, res) => {
     try {
         const { id, type } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).send("Invalid ID format");
+        }
         const prCheck = await PRCheck.findById(id);
         if (!prCheck) return res.status(404).send("Not found");
 

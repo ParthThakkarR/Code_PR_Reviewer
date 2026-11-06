@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { getStaticAnalysis } from "../services/staticService.js";
-import { analyzeWithAI } from "../services/aiServices.js";
+import { analyzeWithAI, redactSecrets } from "../services/aiServices.js";
 import Review from "../models/review.js";
 import { calculateScore } from "../utils/score.js";
 import Repo from "../models/repo.js";
@@ -26,24 +26,20 @@ const worker = new Worker(
     "review-queue",
     async (job) => {
         const { code, filename, repoId, language } = job.data;
-
-        const cacheKey = generateHash(code);
+        const sanitizedCode = redactSecrets(code);
+        const cacheKey = generateHash(sanitizedCode);
 
         const cached = await getCache(cacheKey);
 
         let staticData, aiData, score;
 
         if (cached) {
-            console.log("Cache hit:", filename);
-
             staticData = cached.static_analysis;
             aiData = cached.ai_analysis;
             score = cached.score;
         } else {
-            console.log("Cache miss:", filename);
-
-            staticData = await getStaticAnalysis(code, language);
-            aiData = await analyzeWithAI(code, staticData, language);
+            staticData = await getStaticAnalysis(sanitizedCode, language);
+            aiData = await analyzeWithAI(sanitizedCode, staticData, language);
             score = calculateScore(aiData);
 
             await setCache(cacheKey, {
@@ -53,8 +49,9 @@ const worker = new Worker(
             });
         }
 
+        // Store only sanitized code snippet, avoid storing raw secrets in database (Req #48)
         const review = await Review.create({
-            code,
+            code: sanitizedCode.slice(0, 1000), // bounded retention
             language,
             static_analysis: staticData,
             ai_analysis: aiData,
@@ -100,26 +97,42 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-    console.log(`Job ${job.id} completed`);
+    console.log(`Job ${job.id} completed successfully`);
 });
 
 worker.on("failed", async (job, err) => {
     console.error(`Job ${job.id} failed (Attempt ${job.attemptsMade}):`, err.message);
 
-        if (job.attemptsMade >= job.opts?.attempts) {
-            console.error(`Job ${job.id} permanently failed`);
-
+    if (job.attemptsMade >= (job.opts?.attempts || 3)) {
+        console.error(`Job ${job.id} permanently failed: terminal state reached`);
+        try {
             await Review.create({
-                code: job.data.code,
+                code: "[FAILED_JOB_CONTENT_REDACTED]",
                 language: job.data.language,
                 ai_analysis: {},
                 static_analysis: {},
                 score: 0,
                 error: err.message
             });
-        }
-    });
+        } catch { }
+    }
+});
 
 worker.on("error", () => { });
+
+// Graceful shutdown handling (Req #36)
+const shutdown = async (signal) => {
+    console.log(`Received ${signal}, closing worker gracefully...`);
+    try {
+        if (worker) await worker.close();
+        if (connection) await connection.quit();
+        process.exit(0);
+    } catch {
+        process.exit(1);
+    }
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 export default worker;

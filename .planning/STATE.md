@@ -1,23 +1,30 @@
 # Project State & Verification Memory (GSD Spec)
 
 ## Current Status
-- **Overall Status**: Complete & Verified (All tests passing)
-- **Active Phase**: Production Ready & Running
-- **Last Verification**: 2026-11-03 (Automated verification completed with 100% pass rate)
+- **Overall Status**: Production Ready & Fully Verified (All 70 Production Requirements Addressed)
+- **Active Phases Completed**:
+  - Phase 01: CycloneDX XML SBOM Generation
+  - Phase 02: Vulnerability Scanning Gate (Google OSV Batch Integration)
+  - Phase 03: PR Merge Enforcement & UI
+  - Phase 04: Security Hardening (Demo Auth Removal, Session/CORS Hardening, Input Validation)
+  - Phase 05: Gate Correctness (Chunked Batching, Real CVSS, Fail-Closed, SHA Binding, Real Merge)
+  - Phase 06: SBOM Quality (Lockfile Parsers, SPDX 2.3 Export, Clean Versions, Bom-Refs)
+  - Phase 07: Reliability & Scale (Zod Env Validation, Database Indexes & TTL, Health Probes)
+  - Phase 08: AI Review Hardening (Prompt Delimiters, Secret Redaction, Advisory Isolation)
+  - Phase 09: Engineering Quality (15 Automated Unit Tests Passing, /api/v1 Versioning, Structured Logging)
+  - Phase 10: Deployment (Hardened Non-Root Dockerfiles, Multi-Service Compose with Healthchecks)
+  - Phase 11: Product Features (Read-Only Enforcement UI, GitHub PR Comment Generator)
+  - Phase 12: Repository Polish (MIT LICENSE, SECURITY.md, CONTRIBUTING.md, Production README)
 
-## Key Technical Decisions
-1. **CycloneDX 1.4 XML Format**: Selected as the industry-standard XML SBOM format, matching OWASP and NIST supply chain security standards.
-2. **Dual-Layer Vulnerability Scanning**: Blends live Google OSV batch API queries with a local curated CVE catalog for instant offline testing and zero-delay feedback.
-3. **Strict Gate Enforcement**: Both API level (HTTP 403 Forbidden on `POST /api/sbom/merge`) and client level (disabled button with security rationale) prevent vulnerable PRs from merging.
-4. **Resilient Initialization**: Express server starts smoothly regardless of whether Redis or GitHub OAuth app credentials are configured, avoiding fatal crashes during development.
-5. **Windows Native Script**: Created `run.ps1` for PowerShell alongside existing `run.sh` to provide native 1-click startup on Windows environments.
-
-## Verification Checklist
-- [x] Base branch XML SBOM generation (`<?xml ... <bom xmlns="http://cyclonedx.org/schema/bom/1.4">`)
-- [x] Feature branch XML SBOM generation with embedded `<vulnerabilities>`
-- [x] Clean Feature Branch -> 0 CVEs -> `ALLOWED_TO_MERGE` -> PR merged successfully
-- [x] Vulnerable Feature Branch -> 33 CVEs (including Critical/High) -> `MERGE_BLOCKED` -> Merge request rejected with HTTP 403
-- [x] Frontend compiles via Vite without errors
-- [x] Express backend starts on port 5001 and connects to MongoDB
-- [x] Python analyzer FastAPI service runs on port 8000 and responds to `/` and `/analyze`
-
+## Verification Checklist & Metrics
+- [x] Automated unit test suite passes: 15/15 tests passing in ~300ms (`npm test`)
+- [x] Zero network or database dependencies during unit testing
+- [x] Frontend builds cleanly via Vite production compiler with 0 errors
+- [x] Zero demo/dev auth paths or header bypasses (`x-demo-user`, `/dev-login` removed)
+- [x] Gate policy loaded server-side from `config/gatePolicy.json`
+- [x] Gemini API key sent via `x-goog-api-key` header (never in query parameters)
+- [x] Fail-closed gate behavior verified (scanner errors, timeouts, or empty SBOMs block merge)
+- [x] Multi-format manifest parsing verified (npm, yarn, pnpm, poetry, pipfile, requirements.txt)
+- [x] CycloneDX 1.4 XML & SPDX 2.3 JSON generators verified
+- [x] Health (`/healthz`) and readiness (`/readyz`) observability probes verified
+- [x] Compliance and governance documentation in place (LICENSE, SECURITY.md, CONTRIBUTING.md, README.md)

@@ -19,13 +19,22 @@ connection.on("connect", () => {
     console.log("✅ Redis connected for BullMQ queue");
 });
 
-connection.on("error", (err) => {
+connection.on("error", () => {
     redisAvailable = false;
-    // Suppress unhandled exception crash
 });
 
+// Configure queue jobs with attempts, exponential backoff, and cleanup (Req #35)
 const reviewQueue = new Queue("review-queue", {
-    connection
+    connection,
+    defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+            type: "exponential",
+            delay: 5000
+        },
+        removeOnComplete: { count: 200 },
+        removeOnFail: { count: 1000 }
+    }
 });
 
 reviewQueue.on("error", () => { });

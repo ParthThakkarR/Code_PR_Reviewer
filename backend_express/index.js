@@ -1,47 +1,75 @@
 import "./load-env.js";
+import "./config/env.js"; // Validates environment configuration on startup (Req #39)
 
 import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import session from "express-session";
+import passport from "passport";
+import { randomUUID } from "crypto";
+
 import reviewRoutes from "./routes/reviewRoutes.js";
 import repoRoutes from "./routes/repoRoutes.js";
-import passport from "passport";
-import session from "express-session";
 import authRoutes from "./routes/authRoutes.js";
 import sbomRoutes from "./routes/sbomRoutes.js";
-import { connectDB } from "./config/db.js";
+import { connectDB, isDbConnected } from "./config/db.js";
+import { errorHandler } from "./middleware/errorHandler.js";
+import logger from "./utils/logger.js";
 import "./config/passport.js";
 import "./workers/reviewWorker.js";
 
 const app = express();
-
 app.set("trust proxy", 1);
 
+// Correlation ID middleware (Req #57)
 app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    if (origin && (origin.startsWith("http://localhost") || origin.includes("ngrok-free.dev") || origin.includes("ngrok"))) {
-        res.header("Access-Control-Allow-Origin", origin);
-    } else if (!origin) {
-        res.header("Access-Control-Allow-Origin", "*");
-    }
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-demo-user");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    if (req.method === "OPTIONS") {
-        return res.sendStatus(200);
-    }
+    req.id = req.headers["x-request-id"] || randomUUID();
+    res.setHeader("x-request-id", req.id);
     next();
 });
 
+// Security Headers via Helmet (Req #12)
+app.use(helmet({
+    contentSecurityPolicy: false
+}));
+
+// Strict CORS Allowlist (Req #8)
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
+    .split(",")
+    .map(o => o.trim());
+
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS error: Origin ${origin} not allowed by policy`));
+        }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-request-id"]
+}));
+
+// Database Connection (Req #39)
 connectDB();
 
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
+
+// Required Session Secret Verification (Req #7)
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret && process.env.NODE_ENV === "production") {
+    logger.error("FATAL: SESSION_SECRET environment variable is required in production.");
+    process.exit(1);
+}
 
 app.use(session({
-    secret: process.env.SESSION_SECRET || "code-reviewer-secure-session-key",
+    secret: sessionSecret || "secure-code-reviewer-development-secret-key-32chars",
     resave: false,
     saveUninitialized: false,
     cookie: {
         sameSite: "lax",
-        secure: false,
+        secure: process.env.NODE_ENV === "production",
         httpOnly: true,
         maxAge: 24 * 60 * 60 * 1000
     }
@@ -50,17 +78,41 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Observability and Health Probes (Req #43)
+app.get("/healthz", (req, res) => {
+    res.json({ status: "healthy", timestamp: new Date().toISOString() });
+});
+
+app.get("/readyz", (req, res) => {
+    const dbOk = isDbConnected ? isDbConnected() : true;
+    if (dbOk) {
+        return res.json({ status: "ready", db: "connected" });
+    }
+    return res.status(503).json({ status: "not_ready", db: "disconnected" });
+});
+
 app.get("/api/health", (req, res) => {
     res.json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
-app.use("/api", reviewRoutes);
+// Primary Routes
 app.use("/api/review", reviewRoutes);
 app.use("/api/repo", repoRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/sbom", sbomRoutes);
 
+// Versioned /api/v1 Routes (Req #56)
+app.use("/api/v1/review", reviewRoutes);
+app.use("/api/v1/repo", repoRoutes);
+app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/sbom", sbomRoutes);
+
+// Centralized Error Handler (Req #56)
+app.use(errorHandler);
+
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    logger.info(`Server running on port ${PORT}`);
 });
+
+export default app;

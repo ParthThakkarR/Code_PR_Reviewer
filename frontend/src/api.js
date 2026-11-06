@@ -9,7 +9,6 @@ export default api;
 
 // Auth
 export const getProfile = () => api.get('/api/auth/profile');
-export const devLogin = () => api.post('/api/auth/dev-login');
 export const logoutUser = () => api.post('/api/auth/logout');
 
 // Review (single snippet)

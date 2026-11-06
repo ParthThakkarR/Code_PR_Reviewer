@@ -2,66 +2,16 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { checkPrSbom, mergePr, getUserRepos, getRepoPullRequests } from '../api';
 
-const DEFAULT_BASE_MANIFEST = JSON.stringify({
-  name: "payment-service",
-  version: "1.0.0",
-  dependencies: {
-    "dotenv": "17.3.1",
-    "ms": "2.1.3"
-  }
-}, null, 2);
-
-const SAFE_FEATURE_MANIFEST = JSON.stringify({
-  name: "payment-service",
-  version: "1.1.0",
-  dependencies: {
-    "dotenv": "17.3.1",
-    "ms": "2.1.3",
-    "dayjs": "1.11.13",
-    "clsx": "2.1.1"
-  }
-}, null, 2);
-
-const VULNERABLE_FEATURE_MANIFEST = JSON.stringify({
-  name: "payment-service",
-  version: "1.1.0",
-  dependencies: {
-    "dotenv": "17.3.1",
-    "ms": "2.1.3",
-    "jsonwebtoken": "9.0.0",      // CRITICAL CVE-2022-23529
-    "axios": "0.21.1",             // HIGH CVE-2021-3749 ReDoS
-    "lodash": "4.17.15"            // HIGH CVE-2020-8203 Prototype Pollution
-  }
-}, null, 2);
-
 export default function PrSbomGate() {
-  const [repoMode, setRepoMode] = useState('preset'); // 'preset' | 'custom' | 'github'
-  const [testPreset, setTestPreset] = useState('safe'); // 'safe' | 'vulnerable'
   const [searchParams] = useSearchParams();
 
-  useEffect(() => {
-    const o = searchParams.get('owner');
-    const r = searchParams.get('repo');
-    if (o && r) {
-      setOwner(o);
-      setRepo(r);
-      setRepoMode('github');
-      setSelectedGithubRepo(o + '/' + r);
-      handleSelectGithubRepo(o + '/' + r);
-    }
-  }, [searchParams]);
-
-  // Custom inputs
+  // Repository & Branch Inputs
   const [owner, setOwner] = useState('org');
   const [repo, setRepo] = useState('ecommerce-api');
   const [baseBranch, setBaseBranch] = useState('main');
   const [featureBranch, setFeatureBranch] = useState('feature/checkout-flow');
-  const [prNumber, setPrNumber] = useState(42);
-  const [prTitle, setPrTitle] = useState('feat: Add checkout payment & auth flow');
-  const [policy, setPolicy] = useState('standard'); // 'standard' (High/Critical) | 'strict' (Any)
-
-  const [baseManifest, setBaseManifest] = useState(DEFAULT_BASE_MANIFEST);
-  const [featureManifest, setFeatureManifest] = useState(SAFE_FEATURE_MANIFEST);
+  const [prNumber, setPrNumber] = useState('');
+  const [prTitle, setPrTitle] = useState('');
 
   // GitHub integration state
   const [githubRepos, setGithubRepos] = useState([]);
@@ -76,31 +26,35 @@ export default function PrSbomGate() {
   const [error, setError] = useState('');
   const [mergeMessage, setMergeMessage] = useState('');
   const [xmlTab, setXmlTab] = useState('feature'); // 'feature' | 'current'
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'xml' | 'vulnerabilities' | 'diff'
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'xml' | 'diff'
   const [copied, setCopied] = useState(false);
 
-  // Load user repos if available
+  useEffect(() => {
+    const o = searchParams.get('owner');
+    const r = searchParams.get('repo');
+    if (o && r) {
+      setOwner(o);
+      setRepo(r);
+      setSelectedGithubRepo(o + '/' + r);
+      handleSelectGithubRepo(o + '/' + r);
+    }
+  }, [searchParams]);
+
+  // Load user repos if authenticated
   useEffect(() => {
     getUserRepos()
       .then(res => {
         if (Array.isArray(res.data) && res.data.length > 0) {
           setGithubRepos(res.data);
+          if (!selectedGithubRepo) {
+            const first = res.data[0];
+            setSelectedGithubRepo(first.full_name);
+            handleSelectGithubRepo(first.full_name);
+          }
         }
       })
       .catch(() => { });
   }, []);
-
-  // Update preset manifests when preset selection changes
-  const applyPreset = (preset) => {
-    setTestPreset(preset);
-    if (preset === 'safe') {
-      setFeatureBranch('feature/secure-payments');
-      setFeatureManifest(SAFE_FEATURE_MANIFEST);
-    } else {
-      setFeatureBranch('feature/legacy-deps-vulnerable');
-      setFeatureManifest(VULNERABLE_FEATURE_MANIFEST);
-    }
-  };
 
   const handleSelectGithubRepo = async (fullName) => {
     setSelectedGithubRepo(fullName);
@@ -141,6 +95,7 @@ export default function PrSbomGate() {
     setResult(null);
 
     try {
+      // Clean payload: manifests are strictly fetched server-side from GitHub (Req #3)
       const payload = {
         owner,
         repo,
@@ -148,18 +103,14 @@ export default function PrSbomGate() {
         prTitle,
         baseBranch,
         featureBranch,
-        policy,
-        baseManifest,
-        featureManifest,
-        manifestType: 'auto',
-        testPreset: repoMode === 'preset' ? testPreset : null
+        manifestType: 'auto'
       };
 
       const res = await checkPrSbom(payload);
       setResult(res.data);
       setActiveTab('overview');
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Error running SBOM security check');
+      setError(err.response?.data?.message || err.response?.data?.error || err.message || 'Error running SBOM security check');
     } finally {
       setLoading(false);
     }
@@ -178,10 +129,10 @@ export default function PrSbomGate() {
 
     try {
       const res = await mergePr({ checkId: result.checkId });
-      setMergeMessage(res.data.message || 'Pull request merged successfully!');
+      setMergeMessage(res.data.message || 'Pull request merged successfully on GitHub!');
       setResult(prev => ({ ...prev, status: 'MERGED' }));
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Merge failed');
+      setError(err.response?.data?.message || err.response?.data?.error || err.message || 'Merge failed');
     } finally {
       setMerging(false);
     }
@@ -218,75 +169,35 @@ export default function PrSbomGate() {
           <h2 style={{ margin: 0, fontSize: 24, fontWeight: 700 }}>PR &amp; SBOM Vulnerability Gate</h2>
         </div>
         <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 6, lineHeight: 1.5 }}>
-          Generate CycloneDX XML SBOMs for both the feature branch and current/base feature, inspect dependencies, run real-time CVE vulnerability checks, and enforce automated pull request merge gating.
+          Generates CycloneDX XML SBOMs for the feature branch and base branch, performs server-side Google OSV vulnerability scanning, and enforces merge gating based on versioned CVSS policy.
         </p>
+
+        {/* Read-Only / GitHub Enforcement Notice (Req #66) */}
+        <div style={{
+          marginTop: 12,
+          padding: '10px 14px',
+          background: 'rgba(56, 139, 253, 0.08)',
+          border: '1px solid rgba(56, 139, 253, 0.3)',
+          borderRadius: 'var(--radius)',
+          fontSize: 12,
+          color: 'var(--text)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10
+        }}>
+          <span style={{ fontSize: 16 }}>ℹ️</span>
+          <span>
+            <strong>Production Enforcement Mode:</strong> Manifests are fetched directly from GitHub by commit SHA. Gate status is reported via GitHub Check Runs and branch protection. Merging is confirmed through GitHub API.
+          </span>
+        </div>
       </div>
 
-      {/* Mode Selection */}
+      {/* Target Repository and Branch Configuration */}
       <div className="card" style={{ marginBottom: 20, padding: 18 }}>
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-          <button
-            className={repoMode === 'preset' ? 'primary' : ''}
-            onClick={() => setRepoMode('preset')}
-            style={{ fontSize: 13, padding: '7px 16px' }}
-          >
-            ⚡ Quick Interactive Test (Pass / Block Demos)
-          </button>
-          <button
-            className={repoMode === 'custom' ? 'primary' : ''}
-            onClick={() => setRepoMode('custom')}
-            style={{ fontSize: 13, padding: '7px 16px' }}
-          >
-            ✏️ Custom Manifests / Branches
-          </button>
-          {githubRepos.length > 0 && (
-            <button
-              className={repoMode === 'github' ? 'primary' : ''}
-              onClick={() => setRepoMode('github')}
-              style={{ fontSize: 13, padding: '7px 16px' }}
-            >
-              🐙 Select from GitHub Repos ({githubRepos.length})
-            </button>
-          )}
-        </div>
-
-        {/* Preset Selector */}
-        {repoMode === 'preset' && (
-          <div style={{ background: 'var(--surface-hover)', padding: '14px 16px', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginBottom: 8, letterSpacing: 0.5 }}>
-              SELECT TEST SCENARIO
-            </div>
-            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
-                <input
-                  type="radio"
-                  name="preset"
-                  checked={testPreset === 'safe'}
-                  onChange={() => applyPreset('safe')}
-                />
-                <span style={{ color: 'var(--green)', fontWeight: 600 }}>🟢 Pass Scenario: Clean Feature Branch</span>
-                <span style={{ color: 'var(--muted)', fontSize: 12 }}>(0 Critical/High CVEs → Merge Allowed)</span>
-              </label>
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
-                <input
-                  type="radio"
-                  name="preset"
-                  checked={testPreset === 'vulnerable'}
-                  onChange={() => applyPreset('vulnerable')}
-                />
-                <span style={{ color: 'var(--red)', fontWeight: 600 }}>🔴 Block Scenario: Insecure Feature Branch</span>
-                <span style={{ color: 'var(--muted)', fontSize: 12 }}>(Contains CVEs in axios, lodash, jwt → Merge Blocked)</span>
-              </label>
-            </div>
-          </div>
-        )}
-
-        {/* GitHub Repo Selector */}
-        {repoMode === 'github' && (
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-            <div style={{ flex: 1, minWidth: 200 }}>
-              <label>Select Repository</label>
+        {githubRepos.length > 0 && (
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+            <div style={{ flex: 1, minWidth: 240 }}>
+              <label>Select Synced GitHub Repository</label>
               <select
                 value={selectedGithubRepo}
                 onChange={e => handleSelectGithubRepo(e.target.value)}
@@ -300,7 +211,7 @@ export default function PrSbomGate() {
             </div>
 
             {openPrs.length > 0 && (
-              <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ flex: 1, minWidth: 240 }}>
                 <label>Select Open Pull Request</label>
                 <select
                   value={selectedPrNumber}
@@ -319,9 +230,25 @@ export default function PrSbomGate() {
         )}
 
         {/* Branch & PR Metadata Inputs */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginTop: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
           <div>
-            <label>Current / Base Branch</label>
+            <label>Repository Owner</label>
+            <input
+              value={owner}
+              onChange={e => setOwner(e.target.value)}
+              placeholder="e.g. org or username"
+            />
+          </div>
+          <div>
+            <label>Repository Name</label>
+            <input
+              value={repo}
+              onChange={e => setRepo(e.target.value)}
+              placeholder="e.g. service-api"
+            />
+          </div>
+          <div>
+            <label>Base Branch</label>
             <input
               value={baseBranch}
               onChange={e => setBaseBranch(e.target.value)}
@@ -333,11 +260,11 @@ export default function PrSbomGate() {
             <input
               value={featureBranch}
               onChange={e => setFeatureBranch(e.target.value)}
-              placeholder="feature/checkout-flow"
+              placeholder="feature/branch-name"
             />
           </div>
           <div>
-            <label>Pull Request #</label>
+            <label>Pull Request # (Optional)</label>
             <input
               type="number"
               value={prNumber}
@@ -345,38 +272,7 @@ export default function PrSbomGate() {
               placeholder="42"
             />
           </div>
-          <div>
-            <label>Merge Gate Policy</label>
-            <select value={policy} onChange={e => setPolicy(e.target.value)} style={{ width: '100%' }}>
-              <option value="standard">Block on Critical &amp; High CVEs (Standard)</option>
-              <option value="strict">Block on Any Vulnerability (Strict Zero-CVE)</option>
-            </select>
-          </div>
         </div>
-
-        {/* Custom Manifest Editors */}
-        {repoMode === 'custom' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 16 }}>
-            <div>
-              <label>Current / Base Manifest (package.json or requirements.txt)</label>
-              <textarea
-                value={baseManifest}
-                onChange={e => setBaseManifest(e.target.value)}
-                rows={10}
-                style={{ fontFamily: 'monospace', fontSize: 12 }}
-              />
-            </div>
-            <div>
-              <label>Feature Branch Manifest (package.json or requirements.txt)</label>
-              <textarea
-                value={featureManifest}
-                onChange={e => setFeatureManifest(e.target.value)}
-                rows={10}
-                style={{ fontFamily: 'monospace', fontSize: 12 }}
-              />
-            </div>
-          </div>
-        )}
 
         {/* Action Button */}
         <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
@@ -389,10 +285,10 @@ export default function PrSbomGate() {
             {loading ? (
               <>
                 <span className="spinner" style={{ verticalAlign: 'middle', marginRight: 8 }} />
-                Generating XML &amp; Scanning SBOM…
+                Fetching Manifests &amp; Scanning SBOM…
               </>
             ) : (
-              '🛡️ Generate XML SBOMs & Check Vulnerabilities'
+              '🛡️ Run Server SBOM Security Check'
             )}
           </button>
         </div>
@@ -434,8 +330,8 @@ export default function PrSbomGate() {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{
-                    fontSize: 22,
-                    padding: '6px 12px',
+                    fontSize: 20,
+                    padding: '6px 14px',
                     borderRadius: 20,
                     fontWeight: 800,
                     letterSpacing: 0.5,
@@ -449,16 +345,21 @@ export default function PrSbomGate() {
                         : '🚫 MERGE BLOCKED'}
                   </span>
                   <span style={{ fontSize: 14, color: 'var(--muted)' }}>
-                    PR #{result.prNumber || ''} ({result.featureBranch} → {result.baseBranch})
+                    {result.owner}/{result.repo} ({result.featureBranch} → {result.baseBranch})
                   </span>
                 </div>
 
                 <p style={{ marginTop: 10, marginBottom: 0, fontSize: 14, fontWeight: 500, color: 'var(--text)' }}>
                   {result.gateReason}
                 </p>
+                {result.headSha && (
+                  <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--muted)', marginTop: 4 }}>
+                    Head SHA: {result.headSha} | Base SHA: {result.baseSha || 'N/A'}
+                  </div>
+                )}
               </div>
 
-              {/* THE PULL REQUEST MERGE BUTTON (Enabled only if passes checks) */}
+              {/* Merge Action Button */}
               <div>
                 {result.status === 'MERGED' ? (
                   <div style={{
@@ -469,13 +370,13 @@ export default function PrSbomGate() {
                     fontSize: 13,
                     border: '1px solid var(--border)'
                   }}>
-                    PR is already merged
+                    PR is already merged on GitHub
                   </div>
                 ) : (
                   <button
                     onClick={handleMergePullRequest}
                     disabled={!result.canMerge || merging}
-                    title={result.canMerge ? 'Merge pull request now' : 'Merge is strictly blocked by SBOM security gate'}
+                    title={result.canMerge ? 'Merge pull request on GitHub' : 'Merge is strictly blocked by SBOM security gate'}
                     style={{
                       background: result.canMerge ? 'var(--green)' : '#21262d',
                       color: result.canMerge ? '#ffffff' : 'var(--muted)',
@@ -494,7 +395,7 @@ export default function PrSbomGate() {
                     {merging ? (
                       <>
                         <span className="spinner" />
-                        Merging Pull Request…
+                        Merging via GitHub API…
                       </>
                     ) : result.canMerge ? (
                       <>
@@ -601,7 +502,7 @@ export default function PrSbomGate() {
                     <div style={{ fontSize: 32, marginBottom: 10 }}>✨</div>
                     <div style={{ fontWeight: 700, fontSize: 16 }}>No Known Vulnerabilities Found!</div>
                     <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 4 }}>
-                      All {result.featureComponents?.length || 0} packages in the feature branch passed OSV and CVE database checks.
+                      All {result.featureComponents?.length || 0} packages in the feature branch passed Google OSV checks without CVE alerts.
                     </p>
                   </div>
                 ) : (
@@ -680,10 +581,9 @@ export default function PrSbomGate() {
               </div>
             )}
 
-            {/* TAB 2: CYCLONEDX XML SBOM VIEWERS (FEATURE BRANCH & CURRENT FEATURE) */}
+            {/* TAB 2: CYCLONEDX XML SBOM VIEWERS */}
             {activeTab === 'xml' && (
               <div>
-                {/* XML Selector Tabs */}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
@@ -736,7 +636,6 @@ export default function PrSbomGate() {
                   </div>
                 </div>
 
-                {/* XML Content Display */}
                 <div style={{ position: 'relative' }}>
                   <textarea
                     readOnly
@@ -764,7 +663,6 @@ export default function PrSbomGate() {
             {activeTab === 'diff' && (
               <div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
-                  {/* Added dependencies */}
                   <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 14 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--green)', marginBottom: 8 }}>
                       ADDED IN FEATURE BRANCH ({result.componentsDiff?.added?.length || 0})
@@ -780,7 +678,6 @@ export default function PrSbomGate() {
                     )}
                   </div>
 
-                  {/* Updated dependencies */}
                   <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 14 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--yellow)', marginBottom: 8 }}>
                       UPDATED IN FEATURE BRANCH ({result.componentsDiff?.updated?.length || 0})
@@ -796,7 +693,6 @@ export default function PrSbomGate() {
                     )}
                   </div>
 
-                  {/* Removed dependencies */}
                   <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 14 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)', marginBottom: 8 }}>
                       REMOVED IN FEATURE BRANCH ({result.componentsDiff?.removed?.length || 0})
@@ -813,7 +709,6 @@ export default function PrSbomGate() {
                   </div>
                 </div>
 
-                {/* All Feature Components Table */}
                 <div style={{ marginTop: 20 }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 8, letterSpacing: 0.5 }}>
                     ALL FEATURE BRANCH COMPONENTS ({result.featureComponents?.length || 0})

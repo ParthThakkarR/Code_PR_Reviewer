@@ -9,7 +9,7 @@ const vulnerabilitySchema = new mongoose.Schema({
         enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"],
         default: "HIGH"
     },
-    cvssScore: { type: Number, default: 0 },
+    cvssScore: { type: Number, default: null },
     summary: { type: String, default: "" },
     details: { type: String, default: "" },
     fixedVersion: { type: String, default: "Latest patched version" },
@@ -22,7 +22,7 @@ const componentSchema = new mongoose.Schema({
     version: { type: String, required: true },
     type: { type: String, default: "library" },
     purl: { type: String, default: "" },
-    license: { type: String, default: "NOASSERTION" }
+    license: { type: String, default: null }
 }, { _id: false });
 
 const prCheckSchema = new mongoose.Schema({
@@ -32,11 +32,13 @@ const prCheckSchema = new mongoose.Schema({
     prTitle: { type: String, default: "" },
     baseBranch: { type: String, required: true, default: "main" },
     featureBranch: { type: String, required: true },
+    baseSha: { type: String, default: null },
+    headSha: { type: String, default: null },
     
     // Gate Decision
     status: {
         type: String,
-        enum: ["PENDING", "ALLOWED_TO_MERGE", "MERGE_BLOCKED", "MERGED"],
+        enum: ["PENDING", "ALLOWED_TO_MERGE", "MERGE_BLOCKED", "MERGED", "ERROR", "MERGE_FAILED"],
         default: "PENDING"
     },
     passVulnerabilityCheck: { type: Boolean, default: false },
@@ -80,7 +82,11 @@ const prCheckSchema = new mongoose.Schema({
     timestamps: true
 });
 
+// Indexes for query performance and deduplication
+prCheckSchema.index({ owner: 1, repo: 1, prNumber: 1, headSha: 1 });
+// 90-day retention TTL index
+prCheckSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
+
 const PRCheck = mongoose.model("PRCheck", prCheckSchema);
 
 export default PRCheck;
-

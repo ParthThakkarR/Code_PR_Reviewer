@@ -43,3 +43,4 @@ Thank you for your interest in improving Code_PR_Reviewer!
 - All PRs must pass the built-in automated test suite (`npm test`).
 - PRs introducing new dependencies must pass the Google OSV vulnerability check without Critical or High CVEs.
 - Keep commits atomic and adhere to standard Conventional Commits syntax (`feat:`, `fix:`, `security:`, `docs:`).
+

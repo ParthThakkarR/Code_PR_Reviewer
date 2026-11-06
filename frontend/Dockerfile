@@ -15,3 +15,4 @@ EXPOSE 5173
 RUN sed -i 's/80;/5173;/g' /etc/nginx/conf.d/default.conf
 
 CMD ["nginx", "-g", "daemon off;"]
+

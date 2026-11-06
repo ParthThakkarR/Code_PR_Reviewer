@@ -5,3 +5,4 @@
   "deltaOnly": false,
   "description": "Standard production policy: strictly block on any Critical or High vulnerability (CVSS >= 7.5). Configured server-side."
 }
+

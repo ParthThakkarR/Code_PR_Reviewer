@@ -21,3 +21,4 @@ If you believe you have discovered a vulnerability in this project:
 ## Production Security Gates
 
 All PRs submitted to this repository are automatically evaluated by our own SBOM gate and Google OSV scanner. Vulnerabilities with CVSS >= 7.5 (High/Critical) strictly fail closed and block merging.
+

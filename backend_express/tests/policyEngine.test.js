@@ -111,3 +111,4 @@ test("Policy Engine: Scanner error creates explicit fail-closed ERROR state", ()
     assert.equal(errorResult.status, "ERROR");
     assert.match(errorResult.gateReason, /timed out/);
 });
+

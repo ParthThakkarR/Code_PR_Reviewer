@@ -170,3 +170,4 @@ test("generateSpdxJson: Produces valid SPDX 2.3 JSON specification", () => {
     assert.equal(spdx.packages[0].versionInfo, "17.3.1");
     assert.equal(spdx.packages[0].externalRefs[0].referenceLocator, "pkg:npm/dotenv@17.3.1");
 });
+

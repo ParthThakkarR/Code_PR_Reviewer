@@ -29,18 +29,15 @@ app.use((req, res, next) => {
 });
 
 // Security Headers via Helmet (Req #12)
-app.use(helmet({
-    contentSecurityPolicy: false
-}));
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // Strict CORS Allowlist (Req #8)
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
-    .split(",")
-    .map(o => o.trim());
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
+        const isTunnel = origin && (origin.endsWith(".loca.lt") || origin.includes("ngrok"));
+        if (!origin || allowedOrigins.includes(origin) || (process.env.NODE_ENV !== "production" && isTunnel)) {
             callback(null, true);
         } else {
             callback(new Error(`CORS error: Origin ${origin} not allowed by policy`));
@@ -51,12 +48,9 @@ app.use(cors({
     allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "x-request-id"]
 }));
 
-// Database Connection (Req #39)
 connectDB();
-
 app.use(express.json({ limit: "2mb" }));
 
-// Required Session Secret Verification (Req #7)
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret && process.env.NODE_ENV === "production") {
     logger.error("FATAL: SESSION_SECRET environment variable is required in production.");
@@ -79,21 +73,9 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 // Observability and Health Probes (Req #43)
-app.get("/healthz", (req, res) => {
-    res.json({ status: "healthy", timestamp: new Date().toISOString() });
-});
-
-app.get("/readyz", (req, res) => {
-    const dbOk = isDbConnected ? isDbConnected() : true;
-    if (dbOk) {
-        return res.json({ status: "ready", db: "connected" });
-    }
-    return res.status(503).json({ status: "not_ready", db: "disconnected" });
-});
-
-app.get("/api/health", (req, res) => {
-    res.json({ status: "healthy", timestamp: new Date().toISOString() });
-});
+app.get("/healthz", (req, res) => res.json({ status: "healthy", timestamp: new Date().toISOString() }));
+app.get("/readyz", (req, res) => isDbConnected() ? res.json({ status: "ready", db: "connected" }) : res.status(503).json({ status: "not_ready", db: "disconnected" }));
+app.get("/api/health", (req, res) => res.json({ status: "healthy", timestamp: new Date().toISOString() }));
 
 // Primary Routes
 app.use("/api/review", reviewRoutes);
@@ -107,12 +89,9 @@ app.use("/api/v1/repo", repoRoutes);
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/sbom", sbomRoutes);
 
-// Centralized Error Handler (Req #56)
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-    logger.info(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
 
 export default app;

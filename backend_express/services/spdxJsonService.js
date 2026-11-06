@@ -61,3 +61,4 @@ export function generateSpdxJson({
 
     return spdxDocument;
 }
+
